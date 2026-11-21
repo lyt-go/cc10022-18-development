@@ -70,3 +70,11 @@ body { margin: 0; background: #f6f8fb; color: #1f2937; }
 .analysis-chart { display: flex; align-items: flex-end; gap: 8px; height: 160px; padding: 12px 0; }
 .analysis-bar { flex: 1; border-radius: 4px 4px 0 0; background: var(--brand); min-width: 24px; position: relative; transition: height 0.4s; }
 .analysis-bar span { position: absolute; bottom: -20px; left: 50%; transform: translateX(-50%); font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+/* 按版本回溯血缘：核对范围与来源时间线 */
+.version-export { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 12px 0; }
+.version-export-head h3 { margin: 0 0 4px; font-size: 15px; }
+.version-export .analysis-form { margin: 10px 0; padding: 0; background: transparent; border: none; }
+.version-export .stat-value.small { font-size: 14px; }
+.scope-note { padding: 8px 10px; background: #f8fafc; border-left: 3px solid var(--brand); font-size: 13px; margin: 8px 0 12px; }
+.status-legend .legend-item { margin-right: 12px; }

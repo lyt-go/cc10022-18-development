@@ -27,6 +27,7 @@ from app.services.mdm_api import MdmApiService
 from app.services.mdm_sync import MdmSyncService
 from app.services.mdm_version import MdmVersionService
 from app.services.mdm_dashboard import MdmDashboardService
+from app.store import store
 
 
 class TestBusinessChains:
@@ -282,6 +283,99 @@ class TestBusinessChains:
         assert "golden_records" in summary
         assert "duplicate_clusters" in summary
 
+    # ── 链路7: 黄金记录版本→按版本匹配生效窗口→历史血缘导出 ──
+    def test_chain7_versioned_lineage_export(self):
+        """指定黄金版本 -> 生效窗口匹配血缘 -> 历史导出与核对范围。"""
+        golden_id = "GR-audit-2026-03"
+        version_svc = MdmVersionService()
+        # 同一历史版本有两项复核：两个复核批次共用一个版本快照，
+        # 版本时间用补录的批次时间，而不是补录当刻
+        version_svc.snapshot_golden_version(
+            golden_id,
+            {"phone": "13800001111", "address": "北京市朝阳区A路1号", "代表字段": "phone"},
+            version_time="2026-03-01T09:00:00",
+            change_batch="BATCH-2026-03",
+        )
+        version_svc.snapshot_golden_version(
+            golden_id,
+            {"phone": "13900002222"},
+            version_time="2026-06-15T10:00:00",
+            change_batch="BATCH-2026-06",
+        )
+        history = version_svc.query_version_history(golden_id)
+        snapshot = next(v for v in history if v["版本时间"] == "2026-03-01T09:00:00")
+
+        lineage_svc = RecordLineageService()
+
+        def add_lineage(field, system, record, raw, transforms, effective,
+                        expire_time="", review="", version=""):
+            return lineage_svc.record_field_lineage(
+                golden_id, record, system, field, transforms,
+                raw_value=raw, effective_time=effective, expire_time=expire_time,
+                version=version, review=review,
+            )
+
+        # 旧电话的历次变换：标准化两次，后一次接替前一次，均早于版本时间
+        add_lineage("customer.phone", "CRM", "SRC-CRM-88", "138-0000-1111",
+                    ["trim"], "2026-02-01T00:00:00",
+                    expire_time="2026-02-20T00:00:00", review="复核-2026-02")
+        add_lineage("customer.phone", "CRM", "SRC-CRM-88", "13800001111",
+                    ["trim", "去掉分隔符"], "2026-02-20T00:00:00", review="复核-2026-03")
+        # 旧地址只有原始值，没有来源凭证
+        add_lineage("customer.address", "ERP", "SRC-ERP-77", "北京市朝阳区A路1号",
+                    [], "2026-02-28T00:00:00", review="复核-2026-03")
+        # 版本之后的联系方式变更：不得混入更早的历史导出
+        add_lineage("customer.phone", "CRM", "SRC-CRM-88", "13900002222",
+                    ["trim"], "2026-06-15T10:00:00", version="2")
+        # 后来加入的客服来源：只在窗口外，不进更早版本的字段来源
+        add_lineage("customer.phone", "客服工单", "SRC-CS-01", "13700003333",
+                    ["人工修正"], "2026-10-01T00:00:00", version="3")
+
+        version = snapshot["版本号"]
+        result = lineage_svc.export_lineage_for_version(golden_id, version)
+        assert result["ok"] is True, f"历史血缘导出失败: {result}"
+
+        # 版本依据与有效时间同时给出
+        assert result["版本依据"]["版本时间"] == snapshot["版本时间"]
+        assert result["有效时间"]["起"] == snapshot["版本时间"]
+        assert result["有效时间"]["止"] == "2026-06-15T10:00:00"
+
+        # 旧电话：窗口内保留历次变换，取版本时点仍生效的一条
+        phone = [f for f in result["字段"] if f["字段路径"] == "customer.phone"]
+        assert len(phone) == 1, f"应只有 CRM 一个电话来源: {phone}"
+        assert phone[0]["原始值"] == "13800001111", phone[0]
+        assert phone[0]["历史条数"] == 2, "旧电话的历次变换应可追溯"
+        assert [h["原始值"] for h in phone[0]["历史"]] == ["138-0000-1111", "13800001111"]
+
+        # 旧地址：原始值在，来源凭证缺失，要交代可核对范围
+        address = [f for f in result["字段"] if f["字段路径"] == "customer.address"]
+        assert address and address[0]["原始值"] == "北京市朝阳区A路1号"
+        assert address[0]["变换证据"] == ""
+        assert address[0]["核对状态"] == "缺变换证据，可核对原始值"
+        assert "customer.address@ERP" in result["核对范围"]["缺失变换证据字段"]
+        assert "customer.phone" in result["核对范围"]["可核对字段"]
+
+        # 后来加入的客服来源不进入更早版本
+        systems = {f["来源系统"] for f in result["字段"]}
+        assert "客服工单" not in systems, f"客服来源不应出现在历史导出: {systems}"
+        timeline = {item["来源系统"]: item for item in result["来源系统时间线"]}
+        assert timeline["客服工单"]["晚于版本加入"] is True
+        assert timeline["客服工单"]["纳入本版本"] is False
+
+        # 历史证据原样存留：窗口外记录仍在存储里，没有被删改
+        stored = [r for r in store.rows("record_lineage") if r.get("黄金ID") == golden_id]
+        assert any(r["来源系统"] == "客服工单" and r["原始值"] == "13700003333" for r in stored)
+        assert len(result["窗口外血缘"]) >= 2
+
+        # 导出批次可被审计批次再次下载核对
+        exports = lineage_svc.list_version_exports(golden_id)
+        assert exports and exports[0]["目标版本"] == version
+        assert exports[0]["导出编号"] == result["导出编号"]
+
+        # 不存在的版本给出明确原因而不是空导出
+        missing = lineage_svc.export_lineage_for_version(golden_id, "99")
+        assert missing["ok"] is False and "99" in missing["reason"]
+
 
 if __name__ == "__main__":
     runner = TestBusinessChains()
@@ -292,6 +386,7 @@ if __name__ == "__main__":
         ("链路4: 清洗→优胜策略→版本快照", runner.test_chain4_survivorship_to_version),
         ("链路5: 黄金记录→查询接口→分发同步", runner.test_chain5_golden_to_sync),
         ("链路6: 参考数据→实体模型→质量统计→看板", runner.test_chain6_reference_to_dashboard),
+        ("链路7: 黄金版本→生效窗口→历史血缘导出", runner.test_chain7_versioned_lineage_export),
     ]
 
     passed = 0

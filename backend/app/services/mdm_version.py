@@ -19,11 +19,15 @@ class MdmVersionService(BaseModuleService):
     NEGATIVE_ACTIONS = []
 
     def snapshot_golden_version(self, golden_id: str,
-                                  record_data: dict[str, Any]) -> dict[str, Any]:
+                                  record_data: dict[str, Any],
+                                  version_time: str | None = None,
+                                  change_batch: str | None = None) -> dict[str, Any]:
         """存储黄金记录版本快照，记录字段变更的新旧值对比。
 
         读取当前黄金记录数据，对比新值生成变更字段列表，
         存储版本快照到mdm_version存储，关联黄金ID和变更批次。
+        version_time / change_batch 用于补录或导入既有批次的历史版本：
+        不传时按当前时刻登记，传入时严格使用给定时间作为版本依据。
         """
         from app.services.golden_record import GoldenRecordService
         golden_svc = GoldenRecordService()
@@ -54,8 +58,8 @@ class MdmVersionService(BaseModuleService):
             "变更字段": ",".join(changed_fields),
             "旧值摘要": str(old_summary) if old_summary else "",
             "新值摘要": str(new_summary) if new_summary else "",
-            "变更批次": golden_id,
-            "版本时间": datetime.datetime.utcnow().isoformat(),
+            "变更批次": change_batch or golden_id,
+            "版本时间": version_time or datetime.datetime.utcnow().isoformat(),
             "status": "当前版本",
             "pending": False,
             "abnormal": False,
